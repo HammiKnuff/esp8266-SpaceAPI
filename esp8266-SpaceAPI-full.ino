@@ -1,365 +1,315 @@
-extern "C" {
-  #include "user_interface.h"
-}
 /*
-  2015-07-26: Created by xopr
+  Get space state and show open/closed status on RGB led
 
-  This sketch uses the following external library/libraries
-  - https://github.com/milesburton/Arduino-Temperature-Control-Library
-*/
+  Additional libarys, these can be added via Arduino IDE, menu include libery, manage libery :
+    - WifiClientSecure - for secure HTTPS connection, included in ESP libary
+    - ArduinoJson - Reading the api file on easy way, see https://bblanchon.github.io/ArduinoJson/ I used version 5.8.4
 
-/*
- * List of defines that you can use to set up a ESP-01
- * DallasTemperature  onewire sensor network
- * DHT                single DHT temp/humidity sensor
- * NeoPixels          neopixel strand
- * SpacestateSwitch   switch input that sets space state
- * 
- * TMP10x             I2C temperature
- * MCP9808            I2C precision temperature
- * MPL115A2           I2C barometric pressure/temperature
- * MPL3115A2          I2C barometric pressure/altitude/temperature
- * LTC2990            I2C voltage/current/temperature
- */
-#define DEBUG
-
-//#define DEEP_SLEEP
-
-// Switch and pixels are defined on GPIO0 (choose one)
-//#define SPACESTATE        // Space state switch
-#define NEOPIXELS         // NeoPixels spacestate indicator
-#define NEOPIXEL_COUNT 8  // Number of NeoPixels on the connected string
-
-// 'complex' Sensors are on GPIO2 (choose one)
-// NOTE: this pin is pulled to GND to activate the programming bootloader)
-//#define DALLAS_TEMPERATURE  // Dallas onewire temperature network
-//NOT IMPLEMENTED //#define DHT_SENSOR          // DHT temperature and humidity sensor
-//NOT IMPLEMENTED //#define DHT_ID [ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 ]
-
-// I2C (two wire interface) needs both GPIO0 and GPIO2
-//NOT IMPLEMENTED //#define I2C
-
-// Accesspoint definitions
-const char* strSsid     = "<your_accesspoint>";
-const char* strPassword = "<your_password>";
-
-// API settings
-const char* strServer   = "<your_domain.tld>";
-const char* strApiKey   = "<your_api_key>";
-
-///////////////////////////////////////////////////////////////////////////////////
-// NOTE: you progably don't need to edit anything below this point, unless you want to break stuff
-///////////////////////////////////////////////////////////////////////////////////
-// NOTE: GPIO0 is also the bootloader mode pin
-#define PIN_NEOPIXELS 0
-#define PIN_SWITCH    2
-//#define PIN_ONEWIRE   2
-
-// Sanity check on GPIO0
-#if defined( SPACESTATE ) && defined( NEOPIXELS )
-    #error Cannot use spacestate switch and neopixels: they use the same pin.
-#endif
-#if defined( NEOPIXELS ) && !defined( NEOPIXEL_COUNT )
-    #error You must define the number of NeoPixels if you want to use them (NEOPIXEL_COUNT).
-#endif
-
-// Sanity check on GPIO2
-#if defined( DALLAS_TEMPERATURE ) && defined( DHT_SENSOR )
-    #error Cannot use Dallas temperature and DHT sensor: they use the same pin.
-#endif
-#if defined( DHT_SENSOR ) && !defined( DHT_ID )
-    #error You must define a custom ID if you want to use DHT (DHT_ID).
-#endif
-
-// Sanity check on I2C (GPIO0 and GPIO2)
-#if defined( I2C ) && ( defined( SPACESTATE ) || defined( NEOPIXELS ) || defined( DALLAS_TEMPERATURE ) || defined( DHT_SENSOR ) )
-    #error Cannot combine I2C (Two Wire Interface) with any other sensors or outputs.
-#endif
-
-// Used libraries
-#include <ESP8266WiFi.h>
-
-// Forward declarations
-void wifiConnect();
-
-#ifdef NEOPIXELS
-#include "JsonVarFetch.h"
-//#include "StreamJsonReader.h"
-#include <Adafruit_NeoPixel.h>
-// Parameter 3 = pixel type flags, add together as needed:
-//   NEO_KHZ800  800 KHz bitstream (most NeoPixel products w/WS2812 LEDs)
-//   NEO_KHZ400  400 KHz (classic 'v1' (not v2) FLORA pixels, WS2811 drivers)
-//   NEO_GRB     Pixels are wired for GRB bitstream (most NeoPixel products)
-//   NEO_RGB     Pixels are wired for RGB bitstream (v1 FLORA pixels, not v2)
-Adafruit_NeoPixel pixels = Adafruit_NeoPixel( NEOPIXEL_COUNT, PIN_NEOPIXELS, NEO_GRB + NEO_KHZ800);
-
-// IMPORTANT: To reduce NeoPixel burnout risk, add 1000 uF capacitor across
-// pixel power leads, add 300 - 500 Ohm resistor on first pixel's data input
-// and minimize distance between Arduino and first pixel.  Avoid connecting
-// on a live circuit...if you must, connect GND first.
-#endif
-
-// Dallas temperature uses onewire library
-#ifdef DALLAS_TEMPERATURE
-#define SENSORS
-#define ONEWIRE
-#endif
-
-#ifdef ONEWIRE
-#include <OneWire.h>
-OneWire oneWire( PIN_ONEWIRE );
-#endif
-
-// TODO: this is where my file got corrupted
-//#ifdef DALLAS_TEMPERATURE
-
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// setup
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-void setup()
-{
-    Serial.begin( 115200 );
-    delay( 10 );
-
-    // Apparently, we need to explicitly set the NeoPixel pin as output
-#ifdef NEOPIXELS
-    pinMode( PIN_NEOPIXELS, OUTPUT );
-#endif
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// loop
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-void loop( )
-{
-    connectWireless( );
-
-    updateSpacestateIndicator( );
-
-    /*
-    WAKE_RF_DEFAULT = 0, // RF_CAL or not after deep-sleep wake up, depends on init data byte 108.
-    WAKE_RFCAL = 1,      // RF_CAL after deep-sleep wake up, there will be large current.
-    WAKE_NO_RFCAL = 2,   // no RF_CAL after deep-sleep wake up, there will only be small current.
-    WAKE_RF_DISABLED = 4 // disable RF after deep-sleep wake up, just like modem sleep, there will be the smallest current.
-*/
-#ifdef DEEP_SLEEP
-    // NOTE: We need an extra sleep after calling deepSleep for it to execute.
-    //       This should be esp_yield(). See https://github.com/esp8266/Arduino/issues/609
-    ESP.deepSleep( 20000000, WAKE_RF_DEFAULT );
-    delay( 1000 );
-#else
-    delay( 20000 );
-#endif
-
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// connectWireless
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-void connectWireless()
-{
-    if ( WiFi.status( ) == WL_CONNECTED )
-        return;
-
-    Serial.print( "\nConnecting to " );
-    Serial.print( strSsid );
-
-    WiFi.begin( strSsid, strPassword );
-
-    bool bLed = true;
-
-#ifdef NEOPIXELS
-    // NOTE: currently, rtc memory is empty upon wake. See https://github.com/esp8266/Arduino/issues/619
-    // Read color from the RTC memory which should preserve our stored color
-    uint32_t storedColor;
-    system_rtc_mem_read( 64, &storedColor, 4 );
-#endif
-
-    while ( WiFi.status( ) != WL_CONNECTED )
-    {
-
-#ifdef NEOPIXELS
-        for(uint16_t i=0; i<pixels.numPixels(); i++)
-            pixels.setPixelColor( i, bLed ? pixels.Color( 0, 255, 128 ) : storedColor );
-        pixels.show( );
-        bLed = !bLed;
-#endif
-
-        delay( 500 );
-        Serial.print( "." );
-    }
-
-/*
-#ifdef NEOPIXELS
-        for(uint16_t i=0; i<pixels.numPixels(); i++)
-            pixels.setPixelColor( i, pixels.Color( 0, 0, 0 ) );
-
-        pixels.show(); // This sends the updated pixel color to the hardware.
-#endif
-*/
-
-    Serial.println( "" );
-    Serial.print( "connected; IP:" );
-    Serial.println( WiFi.localIP( ) );
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// updateSpacestateIndicator
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-void updateSpacestateIndicator()
-{
-#ifdef NEOPIXELS
-    uint32_t color;
-    color = determineSpaceStateColor();
-    //color = generateRandomColor();
-
-    //system_rtc_mem_read( 64, &storedColor, 4 );
-    system_rtc_mem_write( 64, &color, 4 );
-
-
-    for(uint16_t i=0; i<pixels.numPixels(); i++)
-        pixels.setPixelColor( i, color );
-
-    pixels.show(); // This sends the updated pixel color to the hardware.
-
-#endif
-}
-
-#ifdef NEOPIXELS
-uint32_t generateRandomColor()
-{
-    byte arrColors[] = { 0, 1, 2, 3, 4, 6, 8, 12, 16, 23, 32, 45, 64, 90, 128, 180, 255 };
-    return pixels.Color( arrColors[ random( sizeof( arrColors ) ) ], arrColors[ random( sizeof( arrColors ) ) ], arrColors[ random( sizeof( arrColors ) ) ] );
-}
-
-uint32_t determineSpaceStateColor()
-{
-    WiFiClient  client;
-    char        character;
-    uint8_t     nNewLines = 0;
-    uint16_t    nPos = 0;
-
-    //static const char* queries[] = { "state.open" };
-    //StreamJsonReader jsonreader( queries, 1 );
+  For additional documentation see :
+    This project on TkkrLab API : https://tkkrlab.nl/wiki/SpaceState_ESP
+    More for about space api : http://spaceapi.net/ or its fork at https://spacedirectory.org/
     
-    static const char* arrQueries[] = { "state.open" };
-    char strResult[ 64 ] = { 0 };
+  Version : 1.0
+  Date Created : 2017-4-5
+  Date last update : 2017-4-5
+  Created by Dave Borghuis / dave@daveborghuis.nl
+  Licence : Creative Commens BY-SA 4.0 https://creativecommons.org/licenses/by-sa/4.0/
+*/
 
-    JsonVarFetch jsonVarFetch( arrQueries, 1, strResult, 64 );
+#include <ESP8266WiFi.h>
+#include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
+#include <ESP8266mDNS.h>
+#include <WiFiUdp.h>
+#include <ArduinoOTA.h>
 
-    if ( !client.connect( strServer, 80 ) )
-    {
-        Serial.println("connection failed");
-        // Cannot connect, return blue
-        return pixels.Color( 0, 0, 255 );
-    }
+//**** Change setting for WIFI ******
+const char* ssid     = "Your Wifi Name";
+const char* password = "Your Wifi Password";
 
-    // We now create a URI for the request
-    String strUrl = "/spaceAPI/";
+//**** Change WEB setting space API ******
+//for directory of space see https://spaceapi.fixme.ch/
 
-    Serial.print( "Requesting URL: " );
-    Serial.println( strUrl );
-  
-    // This will send the request to the server
-    client.print( String("GET ") + strUrl + " HTTP/1.0\r\n" +
-                  "Host: " + strServer + "\r\n\r\n" );
+const char* server = "hamburg.ccc.de";//your hackerspace adress
+const char* resource = "/dooris/status.json";//and the path behind the adress
+const int JSON_BUFFERSIZE = 817; //Size of buffer, make it big enoug to fit whole api/json file.
+const int httpsPort = 443;
 
-    // Read until we have a valid character
-    character = client.read( );
-    while( character == 255 )
-    {
-        delay( 10 );
-        character = client.read( );
-    }
+// Use web browser to view and copy
+// SHA1 fingerprint of the certificate
+const char* fingerprint = "";
 
-    // Read data
-    while( client.connected() && character != 255 /*&& !jsonreader.finished( )*/ )
-    {
-        switch ( character )
-        {
-            case '\n':
-            case '\r':
-                nNewLines++;
-                break;
+//****** LED PINS ********
+#define green_pin D6 // GPO pin 12 //D6
+#define red_pin D7 //GPO pin 13 D7
+#define blue_pin D5 //GP pin 14 D5
 
-            default:
-                if ( nNewLines < 4 )
-                    nNewLines = 0;
-                break;
-        }
-
-        if ( nNewLines >= 4 )
-        {
-            nPos++;
-            //Serial.print( character );
-        }
-
-        ParseStatus::Enum eParseStatus;
-        if ( nNewLines >= 4 && ( eParseStatus = jsonVarFetch.processCharacter( character ) ) < ParseStatus::Ok )
-        {
-            switch ( eParseStatus )
-            {
-                case ParseStatus::Ok:
-                    Serial.println( "Ok" );
-                    break;
-        
-                case ParseStatus::AllocationError:
-                    Serial.println( "AllocationError" );
-                    break;
-        
-                case ParseStatus::ParserError:
-                    Serial.println( "ParserError" );
-                    break;
-        
-                case ParseStatus::JsonError:
-                    Serial.println( "JsonError" );
-                    break;
-        
-                case ParseStatus::Complete:
-                    Serial.println( "Complete" );
-                    break;
-        
-                case ParseStatus::CompletePartialResult:
-                    Serial.println( "CompletePartialResult" );
-                    break;
-        
-                case ParseStatus::CompleteFullResult:
-                    Serial.println( "CompleteFullResult" );
-                    break;
-        
-                default:
-                    Serial.println( "Unknown parser state, this should not happen!" );
-                    break;
-            }
-
-            Serial.print( nPos );
-            Serial.print( "=>" );
-            Serial.print( character );
-            Serial.print( " (0x" );
-            Serial.print( character, HEX );
-            Serial.println( ")" );
-            return pixels.Color( 255, 0, 255 );
-        }
-
-        character = client.read( );
-    }
-
-    // Space open, return green
-    if ( strcmpi( strResult, "true" ) == 0 )
-    {
-        Serial.println( "Open!" );
-        return pixels.Color( 0, 255, 0 );
-    }
-
-    // Space closed, return red
-    if ( strcmpi( strResult, "false" ) == 0 )
-    {
-        Serial.println( "Closed" );
-        return pixels.Color( 255, 0, 0 );
-    }
-
-    // Unknown state, return yellow
-    Serial.println( "Unknown" );
-    return pixels.Color( 255, 150, 0 );
-}
+#ifdef true //change to false for catcode LEDS
+  //anode LED mode
+  #define ON  LOW
+  #define OFF HIGH
+#else
+  //catcode LED mode
+  #define ON  HIGH
+  #define OFF LOW
 #endif
+
+//*** internal parameters dont change ***
+int oldspacestate = -1;
+int spacestate = 0; 
+unsigned int waittime;
+
+const size_t MAX_CONTENT_SIZE = 512; // max size of the HTTP response
+const unsigned long HTTP_TIMEOUT = 10000;  // max respone time from server
+
+WiFiClientSecure client;
+
+void setup() {
+Serial.print("Hallo i bims 1 Ampel vong Lampen her!");
+  Serial.begin(9600);
+  Serial.println();
+  Serial.print("connecting to ");
+  Serial.println(ssid);
+
+  pinMode(blue_pin, OUTPUT);
+  pinMode(green_pin, OUTPUT);
+  pinMode(red_pin, OUTPUT);
+  
+  setLED(OFF, OFF, ON);
+
+  //pinMode(LED_BUILTIN, OUTPUT); //onboard led (NOT on ESP)   //Deaktiviert weil nervt!
+  //digitalWrite(LED_BUILTIN, HIGH); //das was oben steht.
+  
+  //Setup Wifi
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+
+  digitalWrite(LED_BUILTIN, LOW);
+
+  setLED(OFF, OFF, OFF); 
+
+  //OTA
+
+  // Port defaults to 8266
+  // ArduinoOTA.setPort(8266);
+
+  // Hostname defaults to esp8266-[ChipID]
+  ArduinoOTA.setHostname("Space State Siemens Ampel");
+
+  // No authentication by default
+  //ArduinoOTA.setPassword((const char *)"wuff");
+
+  ArduinoOTA.onStart([]() {
+    Serial.println("Start");
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\nEnd");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR) Serial.println("End Failed");
+  });
+  ArduinoOTA.begin();
+  Serial.println("Ready");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+
+void loop() {
+ArduinoOTA.handle();
+  digitalWrite(LED_BUILTIN, HIGH);
+
+  Serial.println("============================");
+
+  if (getStatus()) {
+    setRGBfromStatus();
+  } else {
+    Serial.println("ERROR no state found!");
+    setLED(ON, ON, ON); //blue
+  }
+  digitalWrite(LED_BUILTIN, LOW);
+
+  yield();
+  delay(waittime);  
+}
+
+
+bool getStatus() {
+  // Use WiFiClientSecure class to create TLS connection
+  Serial.print("connecting to ");
+  Serial.println(server);
+
+  if (!client.connect(server, httpsPort)) {
+    yield();
+    Serial.println("connection failed");
+    return false;
+  }
+
+  if (client.verify(fingerprint, server)) {
+    Serial.println("certificate matches");
+  } else {
+    Serial.println("certificate doesn't match");
+  }
+
+  if (sendRequest(server, resource) && skipResponseHeaders()) {
+    if (readReponseContent()) {
+      setRGBfromStatus();
+      client.stop();
+      return true;
+    }
+  }
+
+  //something went wrong
+  return false;
+}
+
+bool readReponseContent() {
+
+  char pBuf[JSON_BUFFERSIZE];
+  String Buffer;  
+ 
+  //Fill buffer 
+  int i;
+  for ( i = 0; i < (sizeof(pBuf) - 1) && client.available(); i++)
+  {
+    char c = client.read();
+    pBuf[i] = c;
+  }
+  // Add zero terminator
+  pBuf[i] = '\0';
+
+  // Allocate a temporary memory pool
+  DynamicJsonBuffer jsonBuffer(JSON_BUFFERSIZE);
+
+  JsonObject& root = jsonBuffer.parseObject(pBuf);
+
+  if (!root.success()) {
+    Serial.println("JSON parsing failed!");
+    return false;
+  }
+
+  if ( root["api"].as<float>() >= (float) 0.13) {
+    spacestate = root["state"]["open"].as<bool>(); //api v 0.13 and up
+  } else {
+    spacestate = root["open"].as<bool>(); //v 0.12
+  }
+
+  //process schedule from space api
+  String schedule = root["cache"]["schedule"].as<String>();
+  String s = schedule.substring(0,1);
+  int num = schedule.substring(2).toInt();
+  if (num != 0) {
+    if (s == "d") { //day
+      waittime = num * 24*60*60*1000;
+    };
+    if (s == "h") { //hour
+      waittime = num * 60*60*1000;    
+    };
+    if (s == "m") { //minute
+      waittime = num * 60*1000;
+    };
+    if (s == "s") { //second (only for testing, not part of 
+      waittime = num*1000;
+    };
+  } else {
+    waittime = 10*1000; //minium 10 minute if no schedule found
+  };
+
+  Serial.print("Space state = ");
+  Serial.print(spacestate);
+  Serial.print(" Waittime = ");
+  Serial.println(waittime);
+
+  return true;
+}
+
+// Send the HTTP GET request to the server
+bool sendRequest(const char* host, const char* resource) {
+  Serial.print("GET ");
+  Serial.print(host);
+  
+  Serial.println(resource);
+
+  client.print("GET ");
+  client.print(resource);
+  client.println(" HTTP/1.0");
+  client.print("Host: ");
+  client.println(host);
+  client.println("Connection: close");
+  client.println();
+
+  return true;
+}
+
+// Skip HTTP headers so that we are at the beginning of the response's body
+bool skipResponseHeaders() {
+  // HTTP headers end with an empty line
+  char endOfHeaders[] = "\r\n\r\n";
+
+  client.setTimeout(HTTP_TIMEOUT);
+  bool ok = client.find(endOfHeaders);
+
+  if (!ok) {
+    Serial.println("No response or invalid response!");
+  } else {
+    Serial.println("Headers skipped.");
+  }
+
+  return ok;
+}
+
+void setRGBfromStatus() {
+  //first time, set current spacestate
+  if (oldspacestate == -1) {
+    if (spacestate) {
+      setLED(OFF, ON, OFF); //Green
+    } else {
+      setLED(ON, OFF, OFF); //Red
+    }
+    oldspacestate = spacestate;
+  }
+
+  if (spacestate != oldspacestate) {
+    if (spacestate == 1 and oldspacestate == 0 ) {
+      Serial.println("Switch from Closed to Open");
+      setLED(OFF, ON, OFF); //Green
+    } else if (spacestate == 0 and oldspacestate == 1 ) {
+      //Space is nu gesloten
+      Serial.println("Switch from Open to Closed");
+      setLED(ON, OFF, OFF); //Red
+    } 
+    oldspacestate = spacestate;
+  }
+}
+
+void setLED(int R, int G, int B) {
+  digitalWrite(blue_pin, B);
+  digitalWrite(green_pin, G);
+  digitalWrite(red_pin, R);
+
+  Serial.print("Set LED to R :");
+  Serial.print(R);
+
+  Serial.print(" G :");
+  Serial.print(G);
+
+  Serial.print(" B : ");
+  Serial.println(B);
+
+  
+}
