@@ -101,7 +101,7 @@ Serial.print("Hallo i bims 1 Ampel vong Lampen her!");
   // ArduinoOTA.setPort(8266);
 
   // Hostname defaults to esp8266-[ChipID]
-  ArduinoOTA.setHostname("Space State Siemens Ampel");
+  ArduinoOTA.setHostname("Space State ESP");
 
   // No authentication by default
   //ArduinoOTA.setPassword((const char *)"wuff");
