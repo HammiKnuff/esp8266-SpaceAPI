@@ -19,9 +19,8 @@
 #include <ESP8266WiFi.h>
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
-#include <ESP8266mDNS.h>
-#include <WiFiUdp.h>
 #include <ArduinoOTA.h>
+#include <DNSServer.h>
 
 //**** Change setting for WIFI ******
 const char* ssid     = "Your Wifi Name";
